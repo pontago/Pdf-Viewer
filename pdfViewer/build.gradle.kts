@@ -16,6 +16,19 @@ android {
     }
     buildTypes {
         release {
+            ndk {
+                debugSymbolLevel = "FULL"
+            }
+            isMinifyEnabled = false
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+        }
+        create("staging") {
+            ndk {
+                debugSymbolLevel = "FULL"
+            }
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

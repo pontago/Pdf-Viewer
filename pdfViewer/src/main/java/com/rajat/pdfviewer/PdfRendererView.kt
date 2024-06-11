@@ -5,17 +5,15 @@ import android.content.Context
 import android.content.res.TypedArray
 import android.graphics.Rect
 import android.graphics.drawable.Drawable
-import android.os.Build
-import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.os.Parcelable
 import android.util.AttributeSet
 import android.view.LayoutInflater
 import android.view.View
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.TextView
+import androidx.compose.ui.unit.IntOffset
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleCoroutineScope
 import androidx.lifecycle.LifecycleObserver
@@ -26,6 +24,7 @@ import androidx.recyclerview.widget.RecyclerView
 import androidx.recyclerview.widget.RecyclerView.NO_POSITION
 import com.rajat.pdfviewer.util.PdfEngine
 import java.io.File
+
 
 /**
  * Created by Rajat on 11,July,2020
@@ -44,11 +43,13 @@ class PdfRendererView @JvmOverloads constructor(
     private var runnable = Runnable {}
     private var enableLoadingForPages: Boolean = false
     private var pdfRendererCoreInitialised = false
-    private var pageMargin: Rect = Rect(0,0,0,0)
+    private var pageMargin: Rect = Rect(0, 0, 0, 0)
     var statusListener: StatusCallBack? = null
     private var positionToUseForState: Int = 0
     private var restoredScrollPosition: Int = NO_POSITION
     private var disableScreenshots: Boolean = false
+    private var initialScrollPosition: IntOffset = IntOffset(0, 0)
+    private var initialPosition: Int = 0
 
     val totalPageCount: Int
         get() {
@@ -66,30 +67,39 @@ class PdfRendererView @JvmOverloads constructor(
         fun onPdfLoadSuccess(absolutePath: String) {}
         fun onError(error: Throwable) {}
         fun onPageChanged(currentPage: Int, totalPage: Int) {}
+        fun onScrolled(position: Int, x: Int, y: Int) {}
     }
 
     fun initWithUrl(
         url: String,
         headers: HeaderData = HeaderData(),
         lifecycleCoroutineScope: LifecycleCoroutineScope,
-        lifecycle: Lifecycle
+        lifecycle: Lifecycle,
+        position: Int = 0,
+        scrollPosition: IntOffset = IntOffset(0, 0)
     ) {
+        initialScrollPosition = scrollPosition
+        initialPosition = position
+
         lifecycle.addObserver(this) // Register as LifecycleObserver
-        PdfDownloader(lifecycleCoroutineScope,headers,url, object : PdfDownloader.StatusListener {
+        PdfDownloader(lifecycleCoroutineScope, headers, url, object : PdfDownloader.StatusListener {
             override fun getContext(): Context = context
             override fun onDownloadStart() {
                 statusListener?.onPdfLoadStart()
             }
+
             override fun onDownloadProgress(currentBytes: Long, totalBytes: Long) {
                 var progress = (currentBytes.toFloat() / totalBytes.toFloat() * 100F).toInt()
                 if (progress >= 100)
                     progress = 100
                 statusListener?.onPdfLoadProgress(progress, currentBytes, totalBytes)
             }
+
             override fun onDownloadSuccess(absolutePath: String) {
                 initWithFile(File(absolutePath))
                 statusListener?.onPdfLoadSuccess(absolutePath)
             }
+
             override fun onError(error: Throwable) {
                 error.printStackTrace()
                 statusListener?.onError(error)
@@ -101,6 +111,7 @@ class PdfRendererView @JvmOverloads constructor(
         init(file)
     }
 
+    /*
     override fun onSaveInstanceState(): Parcelable? {
         val superState = super.onSaveInstanceState()
         val savedState = Bundle()
@@ -115,7 +126,7 @@ class PdfRendererView @JvmOverloads constructor(
         var savedState = state
         if (savedState is Bundle) {
             val superState = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                savedState.getParcelable("superState",Parcelable::class.java)
+                savedState.getParcelable("superState", Parcelable::class.java)
             } else {
                 savedState.getParcelable("superState")
             }
@@ -125,11 +136,12 @@ class PdfRendererView @JvmOverloads constructor(
             super.onRestoreInstanceState(savedState)
         }
     }
+     */
 
     private fun init(file: File) {
         pdfRendererCore = PdfRendererCore(context, file)
         pdfRendererCoreInitialised = true
-        pdfViewAdapter = PdfViewAdapter(context,pdfRendererCore, pageMargin, enableLoadingForPages)
+        pdfViewAdapter = PdfViewAdapter(context, pdfRendererCore, pageMargin, enableLoadingForPages)
         val v = LayoutInflater.from(context).inflate(R.layout.pdf_rendererview, this, false)
         addView(v)
         recyclerView = findViewById(R.id.recyclerView)
@@ -147,10 +159,13 @@ class PdfRendererView @JvmOverloads constructor(
         }
 
         Handler(Looper.getMainLooper()).postDelayed({
-            if (restoredScrollPosition != NO_POSITION) {
-                recyclerView.scrollToPosition(restoredScrollPosition)
-                restoredScrollPosition = NO_POSITION  // Reset after applying
-            }
+            //recyclerView.scrollToPosition(1)
+//            if (restoredScrollPosition != NO_POSITION) {
+//                recyclerView.scrollToPosition(restoredScrollPosition)
+//                restoredScrollPosition = NO_POSITION  // Reset after applying
+//            }
+            //recyclerView.scrollBy(initialScrollPosition.x, initialScrollPosition.y)
+            (recyclerView.layoutManager as LinearLayoutManager).scrollToPositionWithOffset(initialPosition, initialScrollPosition.y)
         }, 300) // Adjust delay as needed
 
         runnable = Runnable {
@@ -181,9 +196,13 @@ class PdfRendererView @JvmOverloads constructor(
                 updatePageNumberDisplay(positionToUse)
                 lastFirstVisiblePosition = firstVisiblePosition
                 lastCompletelyVisiblePosition = firstCompletelyVisiblePosition
-            }else{
+            } else {
                 positionToUseForState = firstVisiblePosition
             }
+
+            val firstItemView: View? = layoutManager.findViewByPosition(positionToUseForState)
+
+            statusListener?.onScrolled(positionToUseForState, firstItemView?.left?.toInt() ?: 0, firstItemView?.top?.toInt() ?: 0)
         }
 
         private fun updatePageNumberDisplay(position: Int) {
@@ -231,12 +250,14 @@ class PdfRendererView @JvmOverloads constructor(
         applyScreenshotSecurity()
         typedArray.recycle()
     }
+
     private fun applyScreenshotSecurity() {
         if (disableScreenshots) {
             // Disables taking screenshots and screen recording
             (context as? Activity)?.window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         }
     }
+
     fun closePdfRender() {
         if (pdfRendererCoreInitialised) {
             pdfRendererCore.closePdfRender()
