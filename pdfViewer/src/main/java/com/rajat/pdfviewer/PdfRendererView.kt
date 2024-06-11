@@ -3,10 +3,16 @@ package com.rajat.pdfviewer
 import android.app.Activity
 import android.content.Context
 import android.content.res.TypedArray
+import android.graphics.Bitmap
 import android.graphics.Rect
 import android.graphics.drawable.Drawable
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.ParcelFileDescriptor
+import android.os.Parcelable
 import android.util.AttributeSet
 import android.view.LayoutInflater
 import android.view.View
@@ -24,6 +30,7 @@ import androidx.recyclerview.widget.RecyclerView
 import androidx.recyclerview.widget.RecyclerView.NO_POSITION
 import com.rajat.pdfviewer.util.PdfEngine
 import java.io.File
+import java.io.FileNotFoundException
 
 
 /**
@@ -50,6 +57,7 @@ class PdfRendererView @JvmOverloads constructor(
     private var disableScreenshots: Boolean = false
     private var initialScrollPosition: IntOffset = IntOffset(0, 0)
     private var initialPosition: Int = 0
+    private var postInitializationAction: (() -> Unit)? = null
 
     val totalPageCount: Int
         get() {
@@ -111,6 +119,12 @@ class PdfRendererView @JvmOverloads constructor(
         init(file)
     }
 
+    @Throws(FileNotFoundException::class)
+    fun initWithUri(uri: Uri) {
+        val fileDescriptor = context.contentResolver.openFileDescriptor(uri, "r") ?: return
+        init(fileDescriptor)
+    }
+
     /*
     override fun onSaveInstanceState(): Parcelable? {
         val superState = super.onSaveInstanceState()
@@ -139,7 +153,13 @@ class PdfRendererView @JvmOverloads constructor(
      */
 
     private fun init(file: File) {
-        pdfRendererCore = PdfRendererCore(context, file)
+        val fileDescriptor = PdfRendererCore.getFileDescriptor(file)
+        init(fileDescriptor)
+    }
+
+    private fun init(fileDescriptor: ParcelFileDescriptor) {
+        // Proceed with safeFile
+        pdfRendererCore = PdfRendererCore(context, fileDescriptor)
         pdfRendererCoreInitialised = true
         pdfViewAdapter = PdfViewAdapter(context, pdfRendererCore, pageMargin, enableLoadingForPages)
         val v = LayoutInflater.from(context).inflate(R.layout.pdf_rendererview, this, false)
@@ -171,6 +191,12 @@ class PdfRendererView @JvmOverloads constructor(
         runnable = Runnable {
             pageNo.visibility = View.GONE
         }
+
+        recyclerView.post {
+            postInitializationAction?.invoke()
+            postInitializationAction = null
+        }
+
     }
 
 
@@ -226,6 +252,21 @@ class PdfRendererView @JvmOverloads constructor(
         }
     }
 
+    fun jumpToPage(pageNumber: Int) {
+        val action = {
+            if (pageNumber in 0 until totalPageCount) {
+                recyclerView.post {
+                    recyclerView.scrollToPosition(pageNumber)
+                }
+            }
+        }
+        if (this::pdfRendererCore.isInitialized) {
+            action()
+        } else {
+            postInitializationAction = action
+        }
+    }
+
     private fun getAttrs(attrs: AttributeSet?, defStyle: Int) {
         val typedArray =
             context.obtainStyledAttributes(attrs, R.styleable.PdfRendererView, defStyle, 0)
@@ -265,4 +306,13 @@ class PdfRendererView @JvmOverloads constructor(
         }
     }
 
+    fun getBitmapByPage(page: Int): Bitmap? {
+        return pdfRendererCore.getBitmapFromCache(page)
+    }
+
+    fun getLoadedBitmaps(): List<Bitmap> {
+        return (0..<totalPageCount).mapNotNull { page ->
+            getBitmapByPage(page)
+        }
+    }
 }
