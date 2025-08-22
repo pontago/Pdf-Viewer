@@ -1,216 +1,323 @@
-    package com.rajat.pdfviewer
-    import android.content.Context
-    import android.graphics.Bitmap
-    import android.graphics.Bitmap.CompressFormat
-    import android.graphics.Color
-    import android.graphics.pdf.PdfRenderer
-    import android.os.Build
-    import android.os.ParcelFileDescriptor
-    import android.util.Log
-    import android.util.Size
-    import com.rajat.pdfviewer.util.CacheManager
-    import com.rajat.pdfviewer.util.CacheManager.Companion.CACHE_PATH
-    import com.rajat.pdfviewer.util.CommonUtils
-    import com.rajat.pdfviewer.util.CommonUtils.Companion.calculateDynamicPrefetchCount
-    import kotlinx.coroutines.CoroutineScope
-    import kotlinx.coroutines.Dispatchers
-    import kotlinx.coroutines.launch
-    import kotlinx.coroutines.withContext
-    import java.io.File
-    import java.io.FileOutputStream
-    import java.nio.file.Files
-    import java.nio.file.Paths
-    import java.util.concurrent.ConcurrentHashMap
+package com.rajat.pdfviewer
 
-    /**
-     * Created by Rajat on 11,July,2020
-     */
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.pdf.PdfRenderer
+import android.os.Build
+import android.os.ParcelFileDescriptor
+import android.util.Log
+import android.util.Size
+import com.rajat.pdfviewer.util.CacheManager
+import com.rajat.pdfviewer.util.CacheStrategy
+import com.rajat.pdfviewer.util.CommonUtils
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelChildren
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.nio.file.Files
+import java.nio.file.Paths
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
+import kotlin.math.abs
 
-    internal class PdfRendererCore(
-        private val context: Context,
-        fileDescriptor: ParcelFileDescriptor
+class PdfRendererCore private constructor(
+    private val fileDescriptor: ParcelFileDescriptor,
+    private val cacheManager: CacheManager,
+    private val pdfRenderer: PdfRenderer
+) {
+
+    private var isRendererOpen = true
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val renderLock = Mutex()
+    private val pageCount = AtomicInteger(pdfRenderer.pageCount)
+
+    private var totalPagesRendered = 0
+    private var totalRenderTime = 0L
+    private var slowestRenderTime = 0L
+    private var slowestPage: Int? = null
+
+    private val openPages = ConcurrentHashMap<Int, PdfRenderer.Page>()
+    private val renderJobs = ConcurrentHashMap<Int, Job>()
+    private val pageDimensionCache = mutableMapOf<Int, Size>()
+    private var prefetchJob: Job? = null
+
+    companion object {
+        var enableDebugMetrics: Boolean = true
+        const val prefetchDistance: Int = 2
+
+        suspend fun create(
+            context: Context,
+            fileDescriptor: ParcelFileDescriptor,
+            cacheIdentifier: String,
+            cacheStrategy: CacheStrategy
+        ): PdfRendererCore = withContext(Dispatchers.IO) {
+            val pdfRenderer = PdfRenderer(fileDescriptor)
+            val manager =
+                CacheManager(context, cacheIdentifier, cacheStrategy).apply { initialize() }
+            val core = PdfRendererCore(fileDescriptor, manager, pdfRenderer)
+            core.preloadPageDimensions()
+            return@withContext core
+        }
+
+        fun getFileDescriptor(file: File): ParcelFileDescriptor {
+            val safeFile = File(sanitizeFilePath(file.path))
+            return ParcelFileDescriptor.open(safeFile, ParcelFileDescriptor.MODE_READ_ONLY)
+        }
+
+        fun getCacheIdentifierFromFile(file: File): String = file.name.toString()
+
+        private fun sanitizeFilePath(filePath: String): String {
+            return try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    val path = Paths.get(filePath)
+                    if (Files.exists(path)) filePath else ""
+                } else filePath
+            } catch (e: Exception) {
+                ""
+            }
+        }
+
+        private const val LOG_TAG = "PdfRendererCore"
+        private const val METRICS_TAG = "PdfRendererCore_Metrics"
+    }
+
+    fun getPageCount(): Int = pageCount.get().takeIf { isRendererOpen } ?: 0
+
+    suspend fun getBitmapFromCache(pageNo: Int): Bitmap? = cacheManager.getBitmapFromCache(pageNo)
+
+    private suspend fun addBitmapToMemoryCache(pageNo: Int, bitmap: Bitmap) =
+        cacheManager.addBitmapToCache(pageNo, bitmap)
+
+    private suspend fun pageExistInCache(pageNo: Int): Boolean =
+        cacheManager.pageExistsInCache(pageNo)
+
+    fun renderPage(
+        pageNo: Int,
+        bitmap: Bitmap,
+        onBitmapReady: ((success: Boolean, pageNo: Int, bitmap: Bitmap?) -> Unit)? = null
     ) {
+        val startTime = System.nanoTime()
 
-        private var isRendererOpen = false
-
-        constructor(context: Context, file: File) : this(
-            context = context,
-            fileDescriptor = getFileDescriptor(file)
-        )
-
-        private val openPages = ConcurrentHashMap<Int, PdfRenderer.Page>()
-        private var pdfRenderer: PdfRenderer? = null
-        private val cacheManager = CacheManager(context)
-
-        companion object {
-
-            private fun sanitizeFilePath(filePath: String): String {
-                return try {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        val path = Paths.get(filePath)
-                        if (Files.exists(path)) {
-                            filePath
-                        } else {
-                            "" // Return a default safe path or handle the error
-                        }
-                    } else {
-                        filePath
-                    }
-                } catch (e: Exception) {
-                    "" // Handle the exception and return a safe default path
-                }
-            }
-
-            internal fun getFileDescriptor(file: File): ParcelFileDescriptor {
-                val safeFile = File(sanitizeFilePath(file.path))
-                return ParcelFileDescriptor.open(safeFile, ParcelFileDescriptor.MODE_READ_ONLY)
-            }
+        if (pageNo < 0 || pageNo >= getPageCount()) {
+            Log.w(METRICS_TAG, "⚠️ Skipped invalid render for page $pageNo")
+            onBitmapReady?.invoke(false, pageNo, null)
+            return
         }
 
-
-        init {
-            pdfRenderer = PdfRenderer(fileDescriptor).also { isRendererOpen = true }
-            cacheManager.initCache()
-        }
-
-        internal fun getBitmapFromCache(pageNo: Int): Bitmap? =
-            cacheManager.getBitmapFromCache(pageNo)
-
-        private fun addBitmapToMemoryCache(pageNo: Int, bitmap: Bitmap) =
-            cacheManager.addBitmapToCache(pageNo, bitmap)
-
-        private fun writeBitmapToCache(pageNo: Int, bitmap: Bitmap, shouldCache: Boolean = true) {
-            if (!shouldCache) return
-            CoroutineScope(Dispatchers.IO).launch {
-                try {
-                    val savePath = File(File(context.cacheDir, CACHE_PATH), pageNo.toString())
-                    FileOutputStream(savePath).use { fos ->
-                        bitmap.compress(CompressFormat.JPEG, 75, fos) // Compress as JPEG
-                    }
-                } catch (e: Exception) {
-                    Log.e("PdfRendererCore", "Error writing bitmap to cache: ${e.message}")
-                }
-            }
-        }
-        fun pageExistInCache(pageNo: Int): Boolean =
-            cacheManager.pageExistsInCache(pageNo)
-
-        fun prefetchPages(currentPage: Int, width: Int, height: Int) {
-            val dynamicPrefetchCount = calculateDynamicPrefetchCount(context, pdfRenderer!!)
-            (currentPage - dynamicPrefetchCount..currentPage + dynamicPrefetchCount)
-                .filter { it in 0 until pdfRenderer!!.pageCount && !pageExistInCache(it) }
-                .forEach { pageNo ->
-                    CoroutineScope(Dispatchers.IO).launch {
-                        val bitmap = CommonUtils.Companion.BitmapPool.getBitmap(width, height)
-                        renderPage(pageNo, bitmap) { success, _, _ ->
-                            if (success) writeBitmapToCache(pageNo, bitmap)
-                            else CommonUtils.Companion.BitmapPool.recycleBitmap(bitmap)
-                        }
-                    }
-                }
-        }
-        private fun openPdfFile(fileDescriptor: ParcelFileDescriptor) {
-            pdfRenderer = PdfRenderer(fileDescriptor)
-        }
-
-        fun getPageCount(): Int {
-            synchronized(this) {
-                if (!isRendererOpen) return 0
-                return pdfRenderer?.pageCount ?: 0
-            }
-        }
-
-        fun renderPage(pageNo: Int, bitmap: Bitmap, onBitmapReady: ((success: Boolean, pageNo: Int, bitmap: Bitmap?) -> Unit)? = null) {
-            if (pageNo >= getPageCount()) {
-                onBitmapReady?.invoke(false, pageNo, null)
-                return
-            }
-            val cachedBitmap = getBitmapFromCache(pageNo)
+        scope.launch {
+            val cachedBitmap = cacheManager.getBitmapFromCache(pageNo)
             if (cachedBitmap != null) {
-                CoroutineScope(Dispatchers.Main).launch { onBitmapReady?.invoke(true, pageNo, cachedBitmap) }
-                return
+                withContext(Dispatchers.Main) {
+                    onBitmapReady?.invoke(true, pageNo, cachedBitmap)
+                    Log.d(LOG_TAG, "Page $pageNo loaded from cache")
+                }
+                return@launch
             }
-            CoroutineScope(Dispatchers.IO).launch {
-                synchronized(this@PdfRendererCore) {
-                    if (!isRendererOpen) return@launch
-                    openPageSafely(pageNo)?.use { pdfPage ->
-                        try {
-                            bitmap.eraseColor(Color.WHITE) // Clear the bitmap with white color
-                            pdfPage.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-                            addBitmapToMemoryCache(pageNo, bitmap)
-                            CoroutineScope(Dispatchers.IO).launch { writeBitmapToCache(pageNo, bitmap) }
-                            CoroutineScope(Dispatchers.Main).launch { onBitmapReady?.invoke(true, pageNo, bitmap) }
-                        } catch (e: Exception) {
-                            CoroutineScope(Dispatchers.Main).launch { onBitmapReady?.invoke(false, pageNo, null) }
-                        }
+
+            if (renderJobs[pageNo]?.isActive == true) return@launch
+            renderJobs[pageNo]?.cancel()
+            renderJobs[pageNo] = launch {
+                var success = false
+                var renderedBitmap: Bitmap? = null
+
+                renderLock.withLock {
+                    if (!isRendererOpen) return@withLock
+                    val pdfPage =
+                        openPageSafely(pageNo).takeIf { isRendererOpen } ?: return@withLock
+
+                    try {
+                        pdfPage.render(
+                            bitmap,
+                            null,
+                            null,
+                            PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY
+                        )
+                        addBitmapToMemoryCache(pageNo, bitmap)
+                        success = true
+                        renderedBitmap = bitmap
+                    } catch (e: Exception) {
+                        Log.e(LOG_TAG, "Error rendering page $pageNo: ${e.message}", e)
                     }
                 }
-            }
-        }
-
-        private suspend fun <T> withPdfPage(pageNo: Int, block: (PdfRenderer.Page) -> T): T? =
-            withContext(Dispatchers.IO) {
-                synchronized(this@PdfRendererCore) {
-                    pdfRenderer?.openPage(pageNo)?.use { page ->
-                        return@withContext block(page)
-                    }
-                }
-                null
-            }
-
-        private val pageDimensionCache = mutableMapOf<Int, Size>()
-
-        fun getPageDimensionsAsync(pageNo: Int, callback: (Size) -> Unit) {
-            pageDimensionCache[pageNo]?.let {
-                callback(it)
-                return
-            }
-
-            CoroutineScope(Dispatchers.IO).launch {
-                val size = withPdfPage(pageNo) { page ->
-                    Size(page.width, page.height).also { pageSize ->
-                        pageDimensionCache[pageNo] = pageSize
-                    }
-                } ?: Size(1, 1) // Fallback to a default minimal size
 
                 withContext(Dispatchers.Main) {
-                    callback(size)
+                    onBitmapReady?.invoke(success, pageNo, renderedBitmap)
+                }
+            }
+        }
+    }
+
+    suspend fun renderPageAsync(pageNo: Int, width: Int, height: Int): Bitmap? =
+        suspendCancellableCoroutine { continuation ->
+            val bitmap = CommonUtils.Companion.BitmapPool.getBitmap(width, height)
+            renderPage(pageNo, bitmap) { success, _, renderedBitmap ->
+                if (success) continuation.resume(renderedBitmap ?: bitmap, null)
+                else {
+                    CommonUtils.Companion.BitmapPool.recycleBitmap(bitmap)
+                    continuation.resume(null, null)
                 }
             }
         }
 
-        private fun openPageSafely(pageNo: Int): PdfRenderer.Page? {
-            synchronized(this) {
-                if (!isRendererOpen) return null
-                closeAllOpenPages()
-                return pdfRenderer?.openPage(pageNo)?.also { page ->
-                    openPages[pageNo] = page
-                }
-            }
-        }
-
-        private fun closeAllOpenPages() {
-            synchronized(this) {
-                openPages.values.forEach { page ->
-                    try {
-                        page.close()
-                    } catch (e: IllegalStateException) {
-                        Log.e("PDFRendererCore","Page was already closed")
+    fun preloadPageDimensions() {
+        scope.launch {
+            for (pageNo in 0 until getPageCount()) {
+                if (!pageDimensionCache.containsKey(pageNo)) {
+                    withPdfPage(pageNo) { page ->
+                        pageDimensionCache[pageNo] = Size(page.width, page.height)
                     }
                 }
-                openPages.clear() // Clear the map after closing all pages.
             }
         }
-
-        fun closePdfRender() {
-            synchronized(this) {
-                closeAllOpenPages()
-                if (isRendererOpen) {
-                    pdfRenderer?.close()
-                    isRendererOpen = false
-                }
-                cacheManager.clearCache()
-            }
-        }
-
     }
+
+    fun schedulePrefetch(currentPage: Int, width: Int, height: Int, direction: Int) {
+        prefetchJob?.cancel()
+        prefetchJob = scope.launch {
+            delay(100)
+            prefetchPagesAround(currentPage, width, height, direction)
+        }
+    }
+
+    private suspend fun prefetchPagesAround(
+        currentPage: Int,
+        fallbackWidth: Int,
+        fallbackHeight: Int,
+        direction: Int
+    ) {
+        val range = when (direction) {
+            1 -> (currentPage + 1)..(currentPage + prefetchDistance)
+            -1 -> (currentPage - prefetchDistance)..<currentPage
+            else -> (currentPage - prefetchDistance)..(currentPage + prefetchDistance)
+        }
+        val sortedPages = range
+            .filter { it in 0 until getPageCount() }
+            .filter { !pageExistInCache(it) }
+            .sortedBy { abs(it - currentPage) } // prefer pages close to current page
+
+        sortedPages.forEach { pageNo ->
+            if (renderJobs[pageNo]?.isActive != true) {
+                renderJobs[pageNo]?.cancel()
+                renderJobs[pageNo] = scope.launch {
+                    val size = withPdfPage(pageNo) { page ->
+                        Size(page.width, page.height)
+                    } ?: Size(fallbackWidth, fallbackHeight)
+
+                    val aspectRatio = size.width.toFloat() / size.height.toFloat()
+                    val height = (fallbackWidth / aspectRatio).toInt()
+
+                    val bitmap =
+                        CommonUtils.Companion.BitmapPool.getBitmap(fallbackWidth, maxOf(1, height))
+                    renderPage(pageNo, bitmap) { success, _, _ ->
+                        if (!success) CommonUtils.Companion.BitmapPool.recycleBitmap(bitmap)
+                    }
+                }
+            }
+        }
+    }
+
+    fun getPageDimensionsAsync(pageNo: Int, callback: (Size) -> Unit) {
+        pageDimensionCache[pageNo]?.let {
+            callback(it)
+            return
+        }
+
+        scope.launch {
+            val size = withPdfPage(pageNo) { page ->
+                Size(page.width, page.height).also { pageDimensionCache[pageNo] = it }
+            } ?: Size(1, 1)
+
+            withContext(Dispatchers.Main) {
+                callback(size)
+            }
+        }
+    }
+
+    fun averageRenderTime(): Long =
+        if (totalPagesRendered == 0) 0 else totalRenderTime / totalPagesRendered
+
+    fun slowestPageInfo(): Pair<Int, Long>? = slowestPage?.let { it to slowestRenderTime }
+
+    private suspend fun <T> withPdfPage(pageNo: Int, block: (PdfRenderer.Page) -> T): T? =
+        withContext(Dispatchers.IO) {
+            renderLock.withLock {
+                if (!isRendererOpen) return@withContext null
+                if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                    closeAllOpenPages()
+                }
+                try {
+                    pdfRenderer.openPage(pageNo).use(block)
+                } catch (e: Exception) {
+                    Log.e(LOG_TAG, "withPdfPage error: ${e.message}", e)
+                    null
+                }
+            }
+        }
+
+    private fun openPageSafely(pageNo: Int): PdfRenderer.Page? {
+        if (!isRendererOpen) return null
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) closeAllOpenPages()
+
+        openPages[pageNo]?.let { return it }
+
+        return try {
+            val page = pdfRenderer.openPage(pageNo)
+            openPages[pageNo] = page
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE && openPages.size > 5) {
+                openPages.keys.minOrNull()?.let { openPages.remove(it)?.close() }
+            }
+            page
+        } catch (e: Exception) {
+            Log.e("PDF_OPEN_TRACKER", "Error opening page $pageNo: ${e.message}", e)
+            null
+        }
+    }
+
+    fun cancelRender(pageNo: Int) {
+        renderJobs[pageNo]?.cancel()
+        renderJobs.remove(pageNo)
+    }
+
+    fun cancelPrefetch() {
+        prefetchJob?.cancel()
+    }
+
+    private fun closeAllOpenPages() {
+        val iterator = openPages.iterator()
+        while (iterator.hasNext()) {
+            val entry = iterator.next()
+            try {
+                entry.value.close()
+            } catch (e: IllegalStateException) {
+                Log.e(LOG_TAG, "Page ${entry.key} was already closed", e)
+            } finally {
+                iterator.remove()
+            }
+        }
+    }
+
+    fun closePdfRender() {
+        if (!isRendererOpen) return
+
+        Log.d(LOG_TAG, "Closing PdfRenderer and releasing resources.")
+
+        scope.coroutineContext.cancelChildren()
+        closeAllOpenPages()
+
+        runCatching { pdfRenderer.close() }
+            .onFailure { Log.e(LOG_TAG, "Error closing PdfRenderer: ${it.message}", it) }
+
+        runCatching { fileDescriptor.close() }
+            .onFailure { Log.e(LOG_TAG, "Error closing file descriptor: ${it.message}", it) }
+
+        isRendererOpen = false
+    }
+}

@@ -50,7 +50,7 @@ Stay tuned as we continue to innovate and improve. Happy coding, and let's keep 
 
 We have migrated our library to Maven Central for easier integration and better reliability. To use the Pdf Viewer library in your project, add the following dependency to your `build.gradle` file:
 
-#### Latest version: ![](https://img.shields.io/maven-central/v/io.github.afreakyelf/Pdf-Viewer.svg)
+#### Latest version: ![](https://img.shields.io/maven-central/v/io.github.afreakyelf/Pdf-Viewer.svg) without 'v'
 
 ### Groovy DSL
 ```gradle
@@ -67,15 +67,19 @@ dependencies {
 }
 ```
 
+### Requirements:
+- Minimum SDK version: 21
+- Compile & Target SDK version: 35 (updated since version 2.2.0)
+
 ## How to use the library?
-Now you have integrated the library in your project but **how do you use it**? Well its really easy just launch the intent with in following way: (Refer to [MainActivity.kt](https://github.com/afreakyelf/Pdf-Viewer/blob/master/app/src/main/java/com/rajat/sample/pdfviewer/MainActivity.kt) for more details.)
+Now you have integrated the library in your project but **how do you use it**? Well it's really easy. Just launch the intent with in following way: (Refer to [MainActivity.kt](https://github.com/afreakyelf/Pdf-Viewer/blob/master/app/src/main/java/com/rajat/sample/pdfviewer/MainActivity.kt) for more details.)
 
 ### Prerequisites
 Ensure the library is included in your project's dependencies.
 
 ### Launching PDF Viewer
 
-#### Open PDF from a URL
+#### Opening PDF from a URL
 To display a PDF from a URL, use the following code:
 
 ```kotlin
@@ -90,12 +94,12 @@ PdfViewerActivity.launchPdfFromUrl(
     context = this,
     pdfUrl = "your_pdf_url_here",
     pdfTitle = "PDF Title",
-    saveTo = PdfViewerActivity.saveTo.ASK_EVERYTIME,
+    saveTo = saveTo.ASK_EVERYTIME,
     enableDownload = true
 )
 ```
 
-#### Open PDF from Local Storage
+#### Opening PDF from Local Storage
 To open a PDF stored in local storage:
 
 ```kotlin
@@ -108,12 +112,12 @@ PdfViewerActivity.launchPdfFromPath(
     context = this,
     path = "your_file_path_or_uri_here",
     pdfTitle = "Title",
-    saveTo = PdfViewerActivity.saveTo.ASK_EVERYTIME,
+    saveTo = saveTo.ASK_EVERYTIME,
     fromAssets = false
 )
 ```
 
-#### Open PDF from Assets
+#### Opening PDF from Assets
 To open a PDF from the app's assets folder:
 
 ```kotlin
@@ -126,7 +130,7 @@ PdfViewerActivity.launchPdfFromPath(
   context = this,
   path = "file_name_in_assets",
   pdfTitle = "Title",
-  saveTo = PdfViewerActivity.saveTo.ASK_EVERYTIME,
+  saveTo = saveTo.ASK_EVERYTIME,
   fromAssets = true
 )
 ```
@@ -159,12 +163,73 @@ For Jetpack Compose, utilize PdfRendererViewCompose:
 
 ```kotlin
 PdfRendererViewCompose(
-    url = "your_pdf_url_here",
-    lifecycleOwner = LocalLifecycleOwner.current
+    source = PdfSource.Remote("your_pdf_url_here"),
+    lifecycleOwner = LocalLifecycleOwner.current,
+    modifier = Modifier,
+    headers = HeaderData(mapOf("Authorization" to "123456789")),
+    statusCallBack = object : PdfRendererView.StatusCallBack {
+                // Override functions here
+    },
+    zoomListener = object : PdfRendererView.ZoomListener {
+                // Override functions here
+        override fun onZoomChanged(isZoomedIn: Boolean, scale: Float) {
+                    TODO("Not yet implemented")
+         }
+     }
 )
 ```
 
-That's pretty much it and you're all wrapped up.
+That's all you need to integrate PDF rendering in your Compose application.
+
+### Track PDF Load & Zoom Events 
+You can monitor download progress, rendering success, page changes, and zoom state using the following callbacks:
+
+#### PDF Load Status
+Use the `statusListener` to get callbacks on PDF lifecycle events:
+
+```kotlin
+binding.pdfView.statusListener = object : PdfRendererView.StatusCallBack {
+    override fun onPdfLoadStart() {
+        Log.i("PDF Status", "Loading started")
+    }
+
+    override fun onPdfLoadProgress(progress: Int, downloadedBytes: Long, totalBytes: Long?) {
+        Log.i("PDF Status", "Download progress: $progress%")
+    }
+
+    override fun onPdfLoadSuccess(absolutePath: String) {
+        Log.i("PDF Status", "Load successful: $absolutePath")
+    }
+
+    override fun onError(error: Throwable) {
+        Log.e("PDF Status", "Error loading PDF: ${error.message}")
+    }
+
+    override fun onPageChanged(currentPage: Int, totalPage: Int) {
+        Log.i("PDF Status", "Page changed: $currentPage / $totalPage")
+    }
+  
+    override fun onPdfRenderStart() {
+      Log.i("PDF Status", "Render started")
+    }
+
+    override fun onPdfRenderSuccess() {
+      Log.i("PDF Status", "Render successful")
+      binding.pdfView.jumpToPage($number)  // Recommend to use `jumpToPage` inside `onPdfRenderSuccess`
+    }
+}
+```
+
+#### Zoom Change Listener
+You can also monitor when the user zooms in or out using `zoomListener`:
+
+```kotlin
+binding.pdfView.zoomListener = object : PdfRendererView.ZoomListener {
+    override fun onZoomChanged(isZoomedIn: Boolean, scale: Float) {
+        Log.i("PDF Zoom", "Zoomed in: $isZoomedIn, Scale: $scale")
+    }
+}
+```
 
 ### Ui Customizations
 You need to add the custom theme to styles.xml/themes.xml file and override the required attribute values.
@@ -220,7 +285,7 @@ Custom:
 |pdfView_backIcon|drawable|Navigation icon|
 |pdfView_downloadIcon|drawable|Download icon|
 |pdfView_downloadIconTint|color|Download icon tint|
-|pdfView_actionBarTint|color|Actionbar background color|
+|pdfView_toolbarColor|color|Actionbar background color|
 |pdfView_titleTextStyle|style|Actionbar title text appearance|
 |pdfView_progressBar|style|Progress bar style|
 
@@ -238,7 +303,7 @@ Any contributions you make are **greatly appreciated**.
 5. Open a Pull Request
 
 ## Donations
-If this project help you reduce time to develop, you can give me a cup of coffee :)
+If this library helps you save time during development, you can buy me a cup of coffee :)
 
 [![paypal](https://www.paypalobjects.com/en_US/i/btn/btn_donateCC_LG.gif)](https://www.paypal.com/paypalme/afreakyelf)
 
