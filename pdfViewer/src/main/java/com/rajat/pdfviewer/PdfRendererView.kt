@@ -8,7 +8,6 @@ import android.graphics.Rect
 import android.graphics.drawable.Drawable
 import android.net.Uri
 import android.util.AttributeSet
-import android.util.Log
 import android.view.LayoutInflater
 import android.view.WindowManager
 import android.widget.FrameLayout
@@ -272,33 +271,19 @@ class PdfRendererView @JvmOverloads constructor(
             )
         )
 
-//        recyclerView.addOnScrollListener(object : RecyclerView.OnScrollListener() {
-//            override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
-//                if (newState == RecyclerView.SCROLL_STATE_IDLE) {
-//                    Log.d("PdfRendererView", "onScrollStateChanged: SCROLL_STATE_IDLE")
-//                }
-//            }
-//        })
-//        (recyclerView.layoutManager as LinearLayoutManager).scrollToPositionWithOffset(
-//            initialPosition,
-//            initialScrollPosition.y
-//        )
 
         recyclerView.postDelayed({
 //            if (restoredScrollPosition != NO_POSITION) {
 //                recyclerView.scrollToPosition(restoredScrollPosition)
 //                restoredScrollPosition = NO_POSITION  // Reset after applying
 //            }
-            Log.d(
-                "PdfRendererView",
-                "initialPosition: $initialPosition, y: $initialScrollPosition"
-            )
 
-//            (recyclerView.layoutManager as LinearLayoutManager).scrollToPositionWithOffset(
-//                initialPosition,
-//                initialScrollPosition.y
-//            )
-        }, 1500) // Adjust delay as needed
+            (recyclerView.layoutManager as ZoomableLinearLayoutManager).smoothScrollToPosition(
+                recyclerView,
+                initialPosition,
+                initialScrollPosition.y
+            )
+        }, 500) // Adjust delay as needed
 
         recyclerView.post {
             postInitializationAction?.invoke()
