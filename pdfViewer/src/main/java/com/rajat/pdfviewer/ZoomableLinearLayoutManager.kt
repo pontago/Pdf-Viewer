@@ -46,7 +46,7 @@ class ZoomableLinearLayoutManager(
             }
 
             override fun calculateSpeedPerPixel(displayMetrics: DisplayMetrics): Float {
-                return 1f / displayMetrics.densityDpi
+                return 10f / displayMetrics.densityDpi
             }
         }
         linearSmoothScroller.targetPosition = position

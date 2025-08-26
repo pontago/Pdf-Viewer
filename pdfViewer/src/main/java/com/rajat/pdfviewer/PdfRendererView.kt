@@ -278,11 +278,14 @@ class PdfRendererView @JvmOverloads constructor(
 //                restoredScrollPosition = NO_POSITION  // Reset after applying
 //            }
 
-            (recyclerView.layoutManager as ZoomableLinearLayoutManager).smoothScrollToPosition(
-                recyclerView,
-                initialPosition,
-                initialScrollPosition.y
-            )
+            if (initialScrollPosition.y != 0 && initialPosition != 0) {
+                recyclerView.smoothScrollToPosition(initialPosition)
+                (recyclerView.layoutManager as ZoomableLinearLayoutManager).smoothScrollToPosition(
+                    recyclerView,
+                    initialPosition,
+                    initialScrollPosition.y
+                )
+            }
         }, 500) // Adjust delay as needed
 
         recyclerView.post {
