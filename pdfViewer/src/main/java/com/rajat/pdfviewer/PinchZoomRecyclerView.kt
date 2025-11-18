@@ -90,10 +90,12 @@ class PinchZoomRecyclerView @JvmOverloads constructor(
                         val x = ev.getX(pointerIndex)
                         val y = ev.getY(pointerIndex)
                         val dx = x - lastTouchX
+                        val dy = y - lastTouchY
                         posX += dx
-//                        posY += dy
+                        posY += dy
                         clampPosition()
                         invalidate()
+                        awakenScrollBars()
 
                         lastTouchX = x
                         lastTouchY = y
@@ -148,7 +150,22 @@ class PinchZoomRecyclerView @JvmOverloads constructor(
      * Allow vertical scroll only when zoomed in.
      */
     override fun canScrollVertically(direction: Int): Boolean {
-        return scaleFactor > 1f && super.canScrollVertically(direction)
+        if (scaleFactor <= 1f) {
+            return super.canScrollVertically(direction)
+        }
+
+        // ズーム時は、パンオフセットとRecyclerViewスクロールの両方を考慮
+        val canPanVertically = when {
+            direction < 0 -> posY < 0  // 上方向: posYがマイナスならまだ上にパン可能
+            direction > 0 -> {
+                val contentHeight = height * scaleFactor
+                posY > -(contentHeight - height).coerceAtLeast(0f)  // 下方向: まだ下にパン可能
+            }
+
+            else -> false
+        }
+
+        return canPanVertically || super.canScrollVertically(direction)
     }
 
     /**
@@ -161,9 +178,22 @@ class PinchZoomRecyclerView @JvmOverloads constructor(
 
         val scrolledPast = -layoutManager.getDecoratedTop(firstView)
         val itemHeight = firstView.height.takeIf { it > 0 } ?: height
-        val offset = (firstVisible * itemHeight + scrolledPast)
+        val recyclerViewOffset = firstVisible * itemHeight + scrolledPast
 
-        return (offset * scaleFactor).toInt()
+        // ズーム時はRecyclerViewのオフセット × scaleFactor + パンオフセット
+        return if (scaleFactor > 1f) {
+            (recyclerViewOffset * scaleFactor - posY).toInt()
+        } else {
+            recyclerViewOffset
+        }
+    }
+
+    /**
+     * Returns the visible height of the scrollbar.
+     */
+    override fun computeVerticalScrollExtent(): Int {
+        // 表示されている部分の高さ（ズームには影響されない）
+        return height
     }
 
     /**
@@ -178,7 +208,12 @@ class PinchZoomRecyclerView @JvmOverloads constructor(
         }
 
         val averageHeight = visibleHeights.average().takeIf { it > 0 } ?: height.toDouble()
-        return (averageHeight * itemCount * scaleFactor).toInt()
+        // ズーム時は実際のコンテンツ全体の高さを返す
+        return if (scaleFactor > 1f) {
+            (averageHeight * itemCount * scaleFactor).toInt()
+        } else {
+            (averageHeight * itemCount).toInt()
+        }
     }
 
     /**
@@ -252,10 +287,10 @@ class PinchZoomRecyclerView @JvmOverloads constructor(
                     .coerceIn(0, (adapter?.itemCount ?: 1) - 1)
                 val offsetInPage = (newOffsetContent - page * anchorItemHeight).roundToInt()
 
-                // jump there exactly, then clear posY
+                // jump there exactly, preserve posY for pan offset
                 (layoutManager as? LinearLayoutManager)
                     ?.scrollToPositionWithOffset(page, -offsetInPage)
-                posY = 0f
+                // posY = 0f を削除（垂直オフセットを保持）
                 invalidate()
             }
         }
